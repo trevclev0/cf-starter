@@ -29,6 +29,8 @@ jobs:
       playwright-version: ${{ steps.playwright-version.outputs.version }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Create GitHub Deployment
         uses: chrnorm/deployment-action@v2
@@ -93,6 +95,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Setup Environment
         uses: ./.github/actions/setup-env
