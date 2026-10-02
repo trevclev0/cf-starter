@@ -4,8 +4,10 @@ on:
   pull_request:
     types: [closed]
 
+# Same group as the PR's preview deploy in deploy.yml: closing the PR cancels
+# an in-flight deploy, and this job waits for it to stop before deleting.
 concurrency:
-  group: preview-cleanup-${{ github.event.pull_request.number }}
+  group: preview-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:

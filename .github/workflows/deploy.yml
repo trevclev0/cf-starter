@@ -5,8 +5,11 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# PR runs share a per-PR group with preview-cleanup.yml, so closing a PR
+# cancels an in-flight preview deploy and the cleanup runs after it ends —
+# a deploy can never recreate the Worker after cleanup deleted it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.event_name == 'pull_request' && format('preview-pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.workflow, github.ref) }}
   cancel-in-progress: true
 
 env:
