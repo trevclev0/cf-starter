@@ -10,12 +10,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  release:
+  # PR check: proves release.config.mjs and its plugins load. On pull_request
+  # runs semantic-release exits before any GitHub call, so this job gets no
+  # release token — PR-controlled config never sees a write-capable
+  # credential.
+  release-dry-run:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Environment
+        uses: ./.github/actions/setup-env
+
+      - name: Release dry-run
+        run: bunx semantic-release --dry-run
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  release:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    # The release App token below does all writes; GITHUB_TOKEN stays
+    # read-only.
+    permissions:
+      contents: read
     steps:
       # A GitHub App token (not GITHUB_TOKEN) so the release commit/tag can
       # land on a protected main. Needs the RELEASE_APP_CLIENT_ID variable and
@@ -37,12 +62,7 @@ jobs:
       - name: Setup Environment
         uses: ./.github/actions/setup-env
 
-      - name: Release (or dry-run on PR)
-        run: |
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            bunx semantic-release --dry-run
-          else
-            bunx semantic-release
-          fi
+      - name: Release
+        run: bunx semantic-release
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
