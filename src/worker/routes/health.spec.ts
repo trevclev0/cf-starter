@@ -35,6 +35,18 @@ describe("GET /api/health", () => {
     expect(response.headers.get("x-request-id")).toBe("req-abc");
   });
 
+  it("replaces an unsafe or oversized x-request-id", async () => {
+    for (const unsafe of ["a b", "x".repeat(129), "<script>"]) {
+      const response = await request(
+        "/api/health",
+        {},
+        { headers: { "x-request-id": unsafe } },
+      );
+
+      expect(response.headers.get("x-request-id")).toMatch(/^[0-9a-f-]{36}$/);
+    }
+  });
+
   it("logs one structured line per request in deployed environments", async () => {
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
 

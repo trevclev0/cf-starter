@@ -3,8 +3,16 @@ import { createMiddleware } from "hono/factory";
 
 const loggedEnvironments = ["development", "preview", "production"];
 
+// Reuse an upstream request id only if it is short and log-safe; otherwise
+// mint our own so clients can't bloat or spoof log correlation ids.
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+
 export const requestIdMiddleware = createMiddleware<AppEnv>(async (c, next) => {
-  const requestId = c.req.header("x-request-id") ?? crypto.randomUUID();
+  const incoming = c.req.header("x-request-id");
+  const requestId =
+    incoming && REQUEST_ID_PATTERN.test(incoming)
+      ? incoming
+      : crypto.randomUUID();
   c.set("requestId", requestId);
   c.header("x-request-id", requestId);
   await next();
