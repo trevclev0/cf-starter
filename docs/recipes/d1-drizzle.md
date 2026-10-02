@@ -93,6 +93,13 @@ Workflow: edit `schema.ts` → `bun run migrate:generate` → commit the SQL in
 `migrations/` → `bun run migrate:local`. Never hand-edit generated migration
 SQL.
 
+drizzle-kit 0.x writes flat files (`migrations/0000_name.sql`), which both
+`wrangler d1 migrations apply` and `readD1Migrations()` read as-is. drizzle-kit
+1.x nests them (`migrations/<name>/migration.sql`): add
+`"migrations_pattern": "*/migration.sql"` to each D1 binding, and check that
+your `@cloudflare/vitest-pool-workers` version's `readD1Migrations()` supports
+nested layouts before relying on it.
+
 ## 5. Expose Drizzle to handlers
 
 `src/worker/types.ts`:
@@ -145,7 +152,11 @@ In `.github/workflows/deploy.yml`, replace the "Using D1?" comment with:
       }}
 ```
 
-All preview Workers share the one preview database.
+All preview Workers share the one preview database, so every open PR's
+migrations land in it. Keep migrations backward-compatible (expand, then
+contract in a later PR): add columns and tables freely, but drop or rename only
+once no open PR's code still uses the old shape. If that is too restrictive,
+create a D1 database per PR instead and delete it in `preview-cleanup.yml`.
 
 ## 7. Integration tests against a real D1
 
