@@ -1,0 +1,48 @@
+name: Release
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      # A GitHub App token (not GITHUB_TOKEN) so the release commit/tag can
+      # land on a protected main. Needs the RELEASE_APP_CLIENT_ID variable and
+      # RELEASE_APP_PRIVATE_KEY secret — see docs/NEW_PROJECT.md.
+      - name: Create GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+
+      - name: Setup Environment
+        uses: ./.github/actions/setup-env
+
+      - name: Release (or dry-run on PR)
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            bunx semantic-release --dry-run
+          else
+            bunx semantic-release
+          fi
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
