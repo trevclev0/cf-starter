@@ -17,6 +17,9 @@ Hibernation API, idle connections cost nothing while the DO sleeps.
 ```ts
 import { DurableObject } from "cloudflare:workers";
 
+/** A socket with no ping for this long counts as gone; see "Presence". */
+const STALE_SOCKET_MS = 120_000;
+
 /**
  * Per-socket state. Instance fields are lost when the DO hibernates, so
  * anything a socket needs later goes through serializeAttachment.
@@ -77,8 +80,31 @@ export class Room extends DurableObject<Env> {
     this.#handleDisconnect(ws);
   }
 
-  #handleDisconnect(_ws: WebSocket) {
-    // See "Presence" below.
+  /** A socket went; the player leaves if it was their last open one. */
+  #handleDisconnect(ws: WebSocket) {
+    const { playerId, swept } = ws.deserializeAttachment() as Attachment;
+    // The sweep already handled this socket; its late close must not
+    // announce the player leaving a second time.
+    if (swept) return;
+    const stillOnline = this.#openSockets(playerId).some((s) => s !== ws);
+    if (stillOnline) return;
+    this.#broadcast(JSON.stringify({ type: "player_left", id: playerId }));
+  }
+
+  /** Closes sockets that stopped pinging; see "Presence" below. */
+  #closeStaleSockets() {
+    for (const ws of this.#openSockets()) {
+      const { lastPing } = ws.deserializeAttachment() as Attachment;
+      if (Date.now() - lastPing <= STALE_SOCKET_MS) continue;
+      try {
+        ws.close(1001, "No ping");
+      } catch {
+        // Already closed.
+      }
+      this.#handleDisconnect(ws);
+      // After handling, so the close the client answers with is skipped.
+      ws.serializeAttachment({ ...ws.deserializeAttachment(), swept: true });
+    }
   }
 
   /** Accepted sockets that are still OPEN; see "Presence" below. */
@@ -204,10 +230,13 @@ it with a heartbeat:
    `src/shared/`), and the DO stores `lastPing` in the attachment.
 2. On a join, on a close, and on a ping (throttled to once every 10 s, so a
    busy room isn't O(N²)), sweep: close sockets with no ping for
-   `STALE_SOCKET_MS`, handle each as a disconnect, and mark it `swept`.
-3. Ignore messages from `swept` sockets only. Don't skip every non-OPEN
-   socket — a client that closes on its own may still deliver its last
-   message.
+   `STALE_SOCKET_MS`, handle each as a disconnect, and mark it `swept`
+   (`#closeStaleSockets` in section 1).
+3. Skip `swept` sockets in both `webSocketMessage` and `#handleDisconnect`.
+   A swept client usually answers the DO's close with its own, and without
+   the guard that close announces the player leaving a second time.
+4. Skip **only** `swept` sockets. Don't skip every non-OPEN socket — a
+   client that closes on its own may still deliver its last message.
 
 No alarm is needed while anyone is connected, because every client's pings
 drive the sweep. Set `STALE_SOCKET_MS` to 120 s or more: Chrome runs a long
@@ -244,12 +273,17 @@ message) exhausts it in about 83 minutes at 20 events a second.
 
 ## 7. Rate limiting
 
-Rate-limit per **player**, in an instance `Map` keyed by player id — not in
-each socket's attachment. A per-socket window multiplies with every tab or
-scripted socket a player opens. Keep a window after its player leaves, so
-reconnecting doesn't refill it, and prune expired windows in the presence
-sweep. Losing the map on hibernation only resets a window at most a second
-old.
+Rate-limit per **player** with a fixed one-second window (Click Rampage
+allows 20 increments per player per second), kept in an instance `Map`
+keyed by player id — not in each socket's attachment. A per-socket window
+multiplies with every tab or scripted socket a player opens. Keep a window
+after its player leaves, so reconnecting doesn't refill it, and prune
+expired windows in the presence sweep.
+
+Instance memory is safe here only because the window is short: losing the
+map on hibernation or eviction resets a window at most a second old. A
+limit that must hold for longer (per minute, per day) belongs in SQLite, or
+it resets whenever the DO sleeps.
 
 ## 8. The client
 
