@@ -26,6 +26,11 @@ const STALE_SOCKET_MS = 120_000;
  */
 type Attachment = {
   playerId: string;
+  /**
+   * When the player came online, as a Room-wide sequence number. Every tab
+   * of a player carries the same one; see "Presence" below.
+   */
+  joinSeq: number;
   /** When (ms) the client last pinged; see "Presence" below. */
   lastPing: number;
   /** Set once a sweep has handled this socket as gone. */
@@ -51,14 +56,32 @@ export class Room extends DurableObject<Env> {
     // make their return look like another tab.
     this.#closeStaleSockets();
 
+    // A player joins only with their first open socket; another tab keeps
+    // their place in join order and isn't announced.
+    const [tab] = this.#openSockets(playerId);
+    const joinSeq = tab
+      ? (tab.deserializeAttachment() as Attachment).joinSeq
+      : this.#nextJoinSeq();
+
     const { 0: client, 1: server } = new WebSocketPair();
     // acceptWebSocket (not server.accept()) opts into hibernation. The tag
     // lets getWebSockets(playerId) find every tab of one player.
     this.ctx.acceptWebSocket(server, [playerId]);
     server.serializeAttachment({
       playerId,
+      joinSeq,
       lastPing: Date.now(),
     } satisfies Attachment);
+
+    server.send(
+      JSON.stringify({ type: "welcome", online: this.#onlinePlayerIds() }),
+    );
+    if (!tab) {
+      this.#broadcast(
+        JSON.stringify({ type: "player_joined", id: playerId }),
+        server,
+      );
+    }
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -82,8 +105,10 @@ export class Room extends DurableObject<Env> {
     }
   }
 
-  async webSocketError(ws: WebSocket) {
-    this.#handleDisconnect(ws);
+  async webSocketError(_ws: WebSocket) {
+    // Not a disconnect: the runtime calls this for non-disconnection errors,
+    // and the socket may still be open. If it isn't, webSocketClose or the
+    // stale sweep handles the leave. Log it (structured) here if useful.
   }
 
   /** A socket went; the player leaves if it was their last open one. */
@@ -111,6 +136,29 @@ export class Room extends DurableObject<Env> {
       // After handling, so the close the client answers with is skipped.
       ws.serializeAttachment({ ...ws.deserializeAttachment(), swept: true });
     }
+  }
+
+  /** Online player ids in join order, one per player however many tabs. */
+  #onlinePlayerIds(): string[] {
+    const joinSeqs = new Map<string, number>();
+    for (const ws of this.#openSockets()) {
+      const { playerId, joinSeq } = ws.deserializeAttachment() as Attachment;
+      joinSeqs.set(playerId, joinSeq);
+    }
+    return [...joinSeqs].sort((a, b) => a[1] - b[1]).map(([id]) => id);
+  }
+
+  /**
+   * Derived from the attachments, which survive hibernation; a counter
+   * field on the instance would reset.
+   */
+  #nextJoinSeq(): number {
+    let next = 0;
+    for (const ws of this.ctx.getWebSockets()) {
+      const { joinSeq } = ws.deserializeAttachment() as Attachment;
+      next = Math.max(next, joinSeq + 1);
+    }
+    return next;
   }
 
   /** Accepted sockets that are still OPEN; see "Presence" below. */
@@ -223,8 +271,12 @@ it as above.
 - **Keep join order in the attachment.** `getWebSockets()` order is not
   join order (newest-first in practice). Store a Room-wide sequence number
   in each attachment (a second tab reuses its player's), derive the next
-  one from the max across sockets, and sort by it. A plain counter field
-  would reset on hibernation.
+  one from the max across sockets, and sort by it (`#nextJoinSeq` and
+  `#onlinePlayerIds` in section 1). A plain counter field would reset on
+  hibernation.
+- **`webSocketError` is not a leave.** Cloudflare calls it for
+  non-disconnection errors, so the socket may still be open. Leave presence
+  to `webSocketClose` and the stale sweep.
 
 **Gotcha — ghost players.** Some sockets never report a close: half-open
 connections, suspended phone tabs, and, under `bun run dev`, an upgrade the
@@ -365,13 +417,25 @@ function open(response: Response) {
   ws.accept();
 
   const queue: ServerMessage[] = [];
-  const waiters: ((message: ServerMessage) => void)[] = [];
+  const waiters: {
+    resolve: (message: ServerMessage) => void;
+    reject: (error: Error) => void;
+  }[] = [];
+  let ended: Error | undefined;
   ws.addEventListener("message", (event) => {
     const message = JSON.parse(String(event.data)) as ServerMessage;
     const waiter = waiters.shift();
-    if (waiter) waiter(message);
+    if (waiter) waiter.resolve(message);
     else queue.push(message);
   });
+  // A read waiting on a socket that ends fails at once with the reason,
+  // rather than hanging until the test times out.
+  const end = (reason: string) => {
+    ended ??= new Error(`Socket ${reason} while waiting for a message`);
+    for (const waiter of waiters.splice(0)) waiter.reject(ended);
+  };
+  ws.addEventListener("close", (event) => end(`closed (${event.code})`));
+  ws.addEventListener("error", () => end("errored"));
 
   return {
     ws,
@@ -380,10 +444,11 @@ function open(response: Response) {
     send: (data: unknown) =>
       ws.send(typeof data === "string" ? data : JSON.stringify(data)),
     next: () =>
-      new Promise<ServerMessage>((resolve) => {
+      new Promise<ServerMessage>((resolve, reject) => {
         const queued = queue.shift();
         if (queued) resolve(queued);
-        else waiters.push(resolve);
+        else if (ended) reject(ended);
+        else waiters.push({ resolve, reject });
       }),
   };
 }
