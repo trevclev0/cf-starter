@@ -47,6 +47,9 @@ export class Room extends DurableObject<Env> {
     // The Worker authenticates; the DO trusts only what the Worker passes.
     const playerId = request.headers.get("x-player-id");
     if (!playerId) return new Response("Missing player", { status: 400 });
+    // Before any presence check, so this player's own stale socket can't
+    // make their return look like another tab.
+    this.#closeStaleSockets();
 
     const { 0: client, 1: server } = new WebSocketPair();
     // acceptWebSocket (not server.accept()) opts into hibernation. The tag
@@ -59,15 +62,18 @@ export class Room extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer) {
+  async webSocketMessage(ws: WebSocket, _raw: string | ArrayBuffer) {
     // Identity comes only from the socket, never from the message body.
     const attachment = ws.deserializeAttachment() as Attachment;
     if (attachment.swept) return;
-    // ...parse `raw` with a shared schema, update state, then broadcast.
+    // ...parse `_raw` with a shared schema. On `ping`, store `lastPing`,
+    // reply `pong`, and sweep; otherwise update state and broadcast.
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string) {
     this.#handleDisconnect(ws);
+    // A stale tab of the same player would otherwise keep them listed.
+    this.#closeStaleSockets();
     try {
       // Complete the closing handshake; a no-op if the runtime already did.
       ws.close(code, reason);
